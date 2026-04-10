@@ -21,8 +21,8 @@ WS_URL         = f"ws://{SERVER_ADDRESS}:8188/ws?clientId={CLIENT_ID}"
 COMFY_INPUT    = "/ComfyUI/input"
 COMFY_OUTPUT   = "/ComfyUI/output"
 
-def wait_for_comfyui(timeout=300):
-    logger.info("Waiting for ComfyUI...")
+def wait_for_comfyui(timeout=600):
+    logger.info("Waiting for ComfyUI (may take longer on first run while models download)...")
     start = time.time()
     while time.time() - start < timeout:
         try:
@@ -30,7 +30,7 @@ def wait_for_comfyui(timeout=300):
             logger.info("ComfyUI ready")
             return
         except:
-            time.sleep(2)
+            time.sleep(3)
     raise Exception("ComfyUI did not start in time")
 
 def to_multiple_of_16(v):
@@ -59,7 +59,6 @@ def download_url(url, out_path):
     return out_path
 
 def resolve_image(inp, key_path, key_url, key_b64, task_id, filename):
-    """Resolve any image input to a filename inside ComfyUI/input."""
     os.makedirs(COMFY_INPUT, exist_ok=True)
     out = os.path.join(COMFY_INPUT, f"{task_id}_{filename}")
     if key_path in inp:
@@ -95,8 +94,6 @@ def run_workflow(ws, prompt):
                     break
 
     history = get_history(prompt_id)[prompt_id]
-
-    # Look for image outputs
     for node_id, node_output in history['outputs'].items():
         if 'images' in node_output:
             for img in node_output['images']:
@@ -113,10 +110,9 @@ def load_workflow(path):
 def handler(job):
     inp     = job.get('input', {})
     task_id = str(uuid.uuid4())[:8]
-
     logger.info(f"Job input keys: {list(inp.keys())}")
 
-    # Resolve input images (image1 required, image2+3 optional)
+    # Resolve input images
     image1 = resolve_image(inp,
         'image_path',   'image_url',   'image_base64',
         task_id, 'image1.jpg')
@@ -128,7 +124,7 @@ def handler(job):
         task_id, 'image3.jpg')
 
     if not image1:
-        return {'error': 'At least one input image required (image_url, image_base64, or image_path)'}
+        return {'error': 'At least one input image required'}
 
     image_count = sum(1 for x in [image1, image2, image3] if x)
     logger.info(f"Images provided: {image_count}")
@@ -161,42 +157,34 @@ def handler(job):
     # Node 4 — TextEncodeQwenImageEditPlus (negative)
     prompt['4']['widgets_values'] = [neg_prompt]
 
-    # Node 7 — LoadImage (image1) — always required
+    # Node 7 — LoadImage (image1, always required)
     prompt['7']['widgets_values'] = [image1, 'image']
 
-    # Wire image1 into node 3 input slot image1 (link 17 already exists)
-    # Node 8 — LoadImage (image2) — optional
+    # Node 8 — LoadImage (image2, optional)
     if image2:
         prompt['8']['widgets_values'] = [image2, 'image']
     else:
-        # Disconnect node 8 from node 3 by removing link 18
-        prompt['3']['inputs'] = [
-            i for i in prompt['3'].get('inputs', [])
-            if not (i.get('name') == 'image2' and i.get('link') == 18)
-        ]
-        prompt['3']['inputs'].append({
-            "name": "image2", "type": "IMAGE", "link": None, "shape": 7
-        })
-        # Remove node 8 entirely if no image2
+        # Disconnect node 8 from node 3 by nulling link 18
+        for i in prompt['3'].get('inputs', []):
+            if i.get('name') == 'image2':
+                i['link'] = None
         if '8' in prompt:
             del prompt['8']
 
-    # Handle image3 — add a new LoadImage node dynamically if provided
+    # image3 — add dynamic LoadImage node if provided
     if image3:
-        max_id = str(max(int(k) for k in prompt.keys()) + 1)
-        new_link_id = 50
+        max_id     = str(max(int(k) for k in prompt.keys()) + 1)
+        new_link   = 50
         prompt[max_id] = {
             "inputs": [],
             "outputs": [{"name": "IMAGE", "type": "IMAGE",
-                         "links": [new_link_id], "slot_index": 0}],
+                         "links": [new_link], "slot_index": 0}],
             "class_type": "LoadImage",
             "widgets_values": [image3, "image"]
         }
-        # Wire into node 3 image3 slot
-        node3_inputs = prompt['3'].get('inputs', [])
-        for i in node3_inputs:
+        for i in prompt['3'].get('inputs', []):
             if i.get('name') == 'image3':
-                i['link'] = new_link_id
+                i['link'] = new_link
                 break
         logger.info(f"image3 wired via node {max_id}")
 
@@ -217,7 +205,6 @@ def handler(job):
         image_b64 = run_workflow(ws, prompt)
     finally:
         ws.close()
-        # Cleanup temp files
         for fname in [image1, image2, image3]:
             if fname:
                 fp = os.path.join(COMFY_INPUT, fname)

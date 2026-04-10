@@ -11,27 +11,18 @@ RUN git clone https://github.com/comfyanonymous/ComfyUI.git /ComfyUI
 WORKDIR /ComfyUI
 RUN pip install -r requirements.txt
 
-# Custom nodes — Qwen image edit node
+# Custom nodes — WanVideoWrapper contains QwenImageEdit nodes
 WORKDIR /ComfyUI/custom_nodes
-RUN git clone https://github.com/kijai/ComfyUI-QwenImageEditNode.git && \
-    pip install -r ComfyUI-QwenImageEditNode/requirements.txt || true
-
-# Fallback — try alternate repo name if above fails
-RUN if [ ! -d "ComfyUI-QwenImageEditNode" ]; then \
-    git clone https://github.com/kijai/ComfyUI-WanVideoWrapper.git && \
-    pip install -r ComfyUI-WanVideoWrapper/requirements.txt; \
-    fi
+RUN git clone https://github.com/kijai/ComfyUI-WanVideoWrapper.git && \
+    pip install -r ComfyUI-WanVideoWrapper/requirements.txt
 
 # RunPod + websocket
-RUN pip install runpod websocket-client huggingface_hub
+RUN pip install runpod websocket-client
 
-# Download Qwen Rapid AIO model
-RUN mkdir -p /ComfyUI/models/checkpoints/Qwen
-RUN huggingface-cli download \
-    Phr00t/Qwen-Image-Edit-Rapid-AIO \
-    Qwen-Rapid-AIO-v1.safetensors \
-    --local-dir /ComfyUI/models/checkpoints/Qwen \
-    --local-dir-use-symlinks False
+# Create dirs — models downloaded at runtime
+RUN mkdir -p /ComfyUI/models/checkpoints/Qwen && \
+    mkdir -p /ComfyUI/input && \
+    mkdir -p /ComfyUI/output
 
 COPY handler.py /handler.py
 COPY workflow.json /workflow.json
