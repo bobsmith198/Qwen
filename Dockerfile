@@ -19,10 +19,15 @@ RUN git clone https://github.com/kijai/ComfyUI-WanVideoWrapper.git && \
 # RunPod + websocket
 RUN pip install runpod websocket-client
 
-# Create dirs — models downloaded at runtime
+# Create dirs
 RUN mkdir -p /ComfyUI/models/checkpoints/Qwen && \
     mkdir -p /ComfyUI/input && \
     mkdir -p /ComfyUI/output
+
+# Download Qwen model at build time
+RUN wget -q --show-progress \
+    "https://huggingface.co/Phr00t/Qwen-Image-Edit-Rapid-AIO/resolve/main/Qwen-Rapid-AIO-v1.safetensors" \
+    -O /ComfyUI/models/checkpoints/Qwen/Qwen-Rapid-AIO-v1.safetensors
 
 COPY handler.py /handler.py
 COPY workflow.json /workflow.json
