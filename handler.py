@@ -10,6 +10,7 @@ import subprocess
 import binascii
 import time
 import shutil
+import copy
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -21,8 +22,8 @@ WS_URL         = f"ws://{SERVER_ADDRESS}:8188/ws?clientId={CLIENT_ID}"
 COMFY_INPUT    = "/ComfyUI/input"
 COMFY_OUTPUT   = "/ComfyUI/output"
 
-def wait_for_comfyui(timeout=600):
-    logger.info("Waiting for ComfyUI (may take longer on first run while models download)...")
+def wait_for_comfyui(timeout=300):
+    logger.info("Waiting for ComfyUI...")
     start = time.time()
     while time.time() - start < timeout:
         try:
@@ -30,7 +31,7 @@ def wait_for_comfyui(timeout=600):
             logger.info("ComfyUI ready")
             return
         except:
-            time.sleep(3)
+            time.sleep(2)
     raise Exception("ComfyUI did not start in time")
 
 def to_multiple_of_16(v):
@@ -73,9 +74,15 @@ def resolve_image(inp, key_path, key_url, key_b64, task_id, filename):
     return None
 
 def queue_prompt(prompt):
-    data = json.dumps({"prompt": prompt, "client_id": CLIENT_ID}).encode()
-    req  = urllib.request.Request(f"{COMFY_URL}/prompt", data=data)
-    return json.loads(urllib.request.urlopen(req).read())
+    data   = json.dumps({"prompt": prompt, "client_id": CLIENT_ID}).encode()
+    req    = urllib.request.Request(f"{COMFY_URL}/prompt", data=data)
+    result = json.loads(urllib.request.urlopen(req).read())
+    if 'error' in result:
+        raise Exception(
+            f"ComfyUI error: {result['error']} | "
+            f"node errors: {result.get('node_errors', {})}"
+        )
+    return result
 
 def get_history(prompt_id):
     with urllib.request.urlopen(f"{COMFY_URL}/history/{prompt_id}") as r:
@@ -83,6 +90,7 @@ def get_history(prompt_id):
 
 def run_workflow(ws, prompt):
     prompt_id = queue_prompt(prompt)['prompt_id']
+    logger.info(f"Prompt queued: {prompt_id}")
     while True:
         msg = ws.recv()
         if isinstance(msg, str):
@@ -92,15 +100,23 @@ def run_workflow(ws, prompt):
                 pid  = data['data'].get('prompt_id')
                 if node is None and pid == prompt_id:
                     break
+            elif data.get('type') == 'execution_error':
+                raise Exception(f"ComfyUI execution error: {data}")
 
     history = get_history(prompt_id)[prompt_id]
+    logger.info(f"History output keys: {list(history.get('outputs', {}).keys())}")
     for node_id, node_output in history['outputs'].items():
+        logger.info(f"Node {node_id} output: {list(node_output.keys())}")
         if 'images' in node_output:
             for img in node_output['images']:
-                img_path = os.path.join(COMFY_OUTPUT, img['filename'])
-                if os.path.exists(img_path):
-                    with open(img_path, 'rb') as f:
-                        return base64.b64encode(f.read()).decode('utf-8')
+                # PreviewImage saves to temp, SaveImage saves to output
+                # check both locations
+                for base_dir in [COMFY_OUTPUT, '/ComfyUI/temp']:
+                    img_path = os.path.join(base_dir, img['filename'])
+                    if os.path.exists(img_path):
+                        logger.info(f"Found image: {img_path}")
+                        with open(img_path, 'rb') as f:
+                            return base64.b64encode(f.read()).decode('utf-8')
     return None
 
 def load_workflow(path):
@@ -129,64 +145,65 @@ def handler(job):
     image_count = sum(1 for x in [image1, image2, image3] if x)
     logger.info(f"Images provided: {image_count}")
 
-    prompt = load_workflow('/workflow.json')
+    # Deep copy — never mutate the cached base workflow
+    prompt = copy.deepcopy(load_workflow('/workflow.json'))
 
-    width     = to_multiple_of_16(inp.get('width',  1024))
-    height    = to_multiple_of_16(inp.get('height', 1024))
-    steps     = int(inp.get('steps',     4))
-    seed      = int(inp.get('seed',     42))
-    cfg       = float(inp.get('cfg',   1.0))
-    sampler   = inp.get('sampler',   'sa_solver')
-    scheduler = inp.get('scheduler', 'beta')
+    width      = to_multiple_of_16(inp.get('width',  1024))
+    height     = to_multiple_of_16(inp.get('height', 1024))
+    steps      = int(inp.get('steps',     4))
+    seed       = int(inp.get('seed',     42))
+    cfg        = float(inp.get('cfg',   1.0))
+    sampler    = inp.get('sampler',   'sa_solver')
+    scheduler  = inp.get('scheduler', 'beta')
     pos_prompt = inp.get('prompt', '')
     neg_prompt = inp.get('negative_prompt', '')
 
-    # Node 1 — CheckpointLoaderSimple
-    prompt['1']['widgets_values'] = ['Qwen/Qwen-Rapid-AIO-v1.safetensors']
+    # ── Patch nodes ──────────────────────────────────────────
 
-    # Node 9 — EmptyLatentImage (output size)
-    prompt['9']['widgets_values'] = [width, height, 1]
+    # Node 1 — CheckpointLoaderSimple
+    prompt['1']['inputs']['ckpt_name'] = 'Qwen/Qwen-Rapid-AIO-NSFW-v23.safetensors'
+
+    # Node 9 — EmptyLatentImage
+    prompt['9']['inputs']['width']      = width
+    prompt['9']['inputs']['height']     = height
+    prompt['9']['inputs']['batch_size'] = 1
 
     # Node 2 — KSampler
-    # [seed, control_after_gen, steps, cfg, sampler, scheduler, denoise]
-    prompt['2']['widgets_values'] = [seed, 'fixed', steps, cfg, sampler, scheduler, 1]
+    prompt['2']['inputs']['seed']         = seed
+    prompt['2']['inputs']['steps']        = steps
+    prompt['2']['inputs']['cfg']          = cfg
+    prompt['2']['inputs']['sampler_name'] = sampler
+    prompt['2']['inputs']['scheduler']    = scheduler
+    prompt['2']['inputs']['denoise']      = 1
 
     # Node 3 — TextEncodeQwenImageEditPlus (positive)
-    prompt['3']['widgets_values'] = [pos_prompt]
+    prompt['3']['inputs']['prompt'] = pos_prompt
 
     # Node 4 — TextEncodeQwenImageEditPlus (negative)
-    prompt['4']['widgets_values'] = [neg_prompt]
+    prompt['4']['inputs']['prompt'] = neg_prompt
 
     # Node 7 — LoadImage (image1, always required)
-    prompt['7']['widgets_values'] = [image1, 'image']
+    prompt['7']['inputs']['image'] = image1
 
     # Node 8 — LoadImage (image2, optional)
     if image2:
-        prompt['8']['widgets_values'] = [image2, 'image']
+        prompt['8']['inputs']['image'] = image2
     else:
-        # Disconnect node 8 from node 3 by nulling link 18
-        for i in prompt['3'].get('inputs', []):
-            if i.get('name') == 'image2':
-                i['link'] = None
-        if '8' in prompt:
-            del prompt['8']
+        # Remove image2 from node 3 inputs and delete node 8
+        prompt['3']['inputs'].pop('image2', None)
+        prompt.pop('8', None)
 
-    # image3 — add dynamic LoadImage node if provided
+    # image3 — inject dynamic LoadImage node if provided
     if image3:
-        max_id     = str(max(int(k) for k in prompt.keys()) + 1)
-        new_link   = 50
-        prompt[max_id] = {
-            "inputs": [],
-            "outputs": [{"name": "IMAGE", "type": "IMAGE",
-                         "links": [new_link], "slot_index": 0}],
-            "class_type": "LoadImage",
-            "widgets_values": [image3, "image"]
+        prompt['10'] = {
+            'class_type': 'LoadImage',
+            'inputs': {'image': image3},
+            '_meta': {'title': 'Input Image 3'}
         }
-        for i in prompt['3'].get('inputs', []):
-            if i.get('name') == 'image3':
-                i['link'] = new_link
-                break
-        logger.info(f"image3 wired via node {max_id}")
+        prompt['3']['inputs']['image3'] = ['10', 0]
+        logger.info("image3 wired via node 10")
+    else:
+        prompt['3']['inputs'].pop('image3', None)
 
     # Connect WebSocket
     ws = websocket.WebSocket()

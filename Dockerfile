@@ -1,10 +1,13 @@
-FROM runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
+FROM runpod/pytorch:2.6.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04
 
 WORKDIR /
 
 RUN apt-get update && apt-get install -y \
     git wget ffmpeg libgl1 libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
+
+# Fix typing_extensions conflict before installing anything else
+RUN pip install --upgrade typing_extensions sqlalchemy
 
 # ComfyUI
 RUN git clone https://github.com/comfyanonymous/ComfyUI.git /ComfyUI
@@ -24,10 +27,10 @@ RUN mkdir -p /ComfyUI/models/checkpoints/Qwen && \
     mkdir -p /ComfyUI/input && \
     mkdir -p /ComfyUI/output
 
-# Download Qwen model at build time
+# Download model at build time — avoids runtime timeout issues
 RUN wget -q --show-progress \
-    "https://huggingface.co/Phr00t/Qwen-Image-Edit-Rapid-AIO/resolve/main/Qwen-Rapid-AIO-v1.safetensors" \
-    -O /ComfyUI/models/checkpoints/Qwen/Qwen-Rapid-AIO-v1.safetensors
+    "https://huggingface.co/Phr00t/Qwen-Image-Edit-Rapid-AIO/resolve/main/v23/Qwen-Rapid-AIO-NSFW-v23.safetensors" \
+    -O /ComfyUI/models/checkpoints/Qwen/Qwen-Rapid-AIO-NSFW-v23.safetensors
 
 COPY handler.py /handler.py
 COPY workflow.json /workflow.json
