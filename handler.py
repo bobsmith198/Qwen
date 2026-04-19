@@ -155,6 +155,7 @@ def handler(job):
     cfg        = float(inp.get('cfg',   1.0))
     sampler    = inp.get('sampler',   'sa_solver')
     scheduler  = inp.get('scheduler', 'beta')
+    denoise    = float(inp.get('denoise', 1.0))
     pos_prompt = inp.get('prompt', '')
     neg_prompt = inp.get('negative_prompt', '')
 
@@ -174,7 +175,7 @@ def handler(job):
     prompt['2']['inputs']['cfg']          = cfg
     prompt['2']['inputs']['sampler_name'] = sampler
     prompt['2']['inputs']['scheduler']    = scheduler
-    prompt['2']['inputs']['denoise']      = 1
+    prompt['2']['inputs']['denoise']      = denoise
 
     # Node 3 — TextEncodeQwenImageEditPlus (positive)
     prompt['3']['inputs']['prompt'] = pos_prompt
